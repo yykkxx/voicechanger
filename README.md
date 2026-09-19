@@ -1,203 +1,124 @@
-# Operit Android 项目
+# VoiceChanger
 
-这是一个基于 **Jetpack Compose** 的现代化 Android 应用开发模板。
+Android 实时变声器应用，支持 DSP 数字信号处理和 RVC AI 语音转换。
 
-## 🚀 项目特性
+## ✨ 功能特性
 
-✅ **Jetpack Compose** - 现代化声明式 UI 框架  
-✅ **Material Design 3** - 最新设计规范  
-✅ **Kotlin** - 100% Kotlin 编写  
-✅ **Gradle Version Catalog** - 统一依赖管理  
-✅ **开箱即用** - 包含完整项目结构  
+### 13 种音色预设
+
+| 预设 | 说明 |
+|------|------|
+| 原声 | 直通不做处理 |
+| 女声 | 男→女变调 +4 半音，共振峰搬移，临场感提升 |
+| 男声 | 女→男变调 -4 半音 |
+| 儿童 | +8 半音，明亮音色 |
+| 怪兽 | -8 半音 + 失真 + 低音增强 |
+| 机器人 | 环形调制，方波载波 |
+| 空灵 | +5 半音 + 回声 + 合唱 |
+| 歌者 | +4 半音 + 合唱 + 颤音 |
+| 电话音 | 带通滤波 + 软饱和 |
+| 浑厚低音 | -6 半音 + 低音增强 + 回声 |
+| 天使 | +8 半音 + 合唱 + 回声 + 临场感 |
+| 电台主播 | 电话音 + 临场感 + 低音衰减 |
+| 自定义 | 用户自由调节参数 |
+
+### DSP 效果链
+
+实时音频处理流水线（零内存分配，线程安全）：
+
+```
+变调 → EQ倾斜 → 低音增强 → 临场感 → 环形调制 → 失真 → 电话音 → 回声 → 合唱 → 镶边 → 颤音 → 软限幅
+```
+
+| 效果 | 原理 |
+|------|------|
+| SmbPitchShifter | FFT 域频谱搬移，支持独立音高/共振峰比 |
+| TiltEq | 一阶倾斜 EQ，高频亮度调整 |
+| BassBoost | 一阶低通分频 + 低频增益 |
+| Presence | 二阶峰值 EQ (3kHz, Q=1.2) |
+| RingModulator | 环形调制（载波 50Hz，可调方波/正弦） |
+| Distortion | 软饱和失真 (tanh 曲线) |
+| Telephone | Chamberlin SVF 带通 (1.2kHz, Q=0.9) |
+| Echo | 反馈延迟线 (250ms, 35% 反馈) |
+| Chorus | 3 条延迟线 + 独立 LFO |
+| Flanger | 短延迟 (1-12ms) + 正弦扫频 |
+| Tremolo | 5.5Hz 幅度调制 |
+| FloatSoftClip | 输出软限幅 |
+
+### RVC AI 语音转换
+
+基于 ONNX Runtime 的 RVC (Retrieval-based Voice Conversion) 引擎：
+
+- **HuBERT**: 语音特征提取 (377MB)
+- **RMVPE**: F0 基频估计 (362MB)
+- **Net_G**: 语音合成解码器 (115MB)
+
+> ⚠️ RVC 模型文件不包含在仓库中，需单独部署。
+
+### 系统级音频路由
+
+通过 Magisk 模块将应用安装为系统特权应用，获取：
+- `CAPTURE_AUDIO_OUTPUT` - 捕获系统音频输出
+- `MODIFY_AUDIO_ROUTING` - 修改音频路由
+- `MODIFY_AUDIO_SETTINGS` - 修改音频设置
 
 ## 📁 项目结构
 
 ```
-android-project/
-├── app/
-│   ├── src/
-│   │   ├── main/
-│   │   │   ├── java/com/java/myapplication/
-│   │   │   │   ├── MainActivity.kt          # 主Activity
-│   │   │   │   └── ui/theme/
-│   │   │   │       ├── Color.kt             # 颜色定义
-│   │   │   │       ├── Theme.kt             # 主题配置
-│   │   │   │       └── Type.kt              # 字体配置
-│   │   │   ├── res/                         # 资源文件
-│   │   │   └── AndroidManifest.xml          # 应用清单
-│   │   ├── androidTest/                     # Android测试
-│   │   └── test/                            # 单元测试
-│   ├── build.gradle.kts                     # App模块配置
-│   └── proguard-rules.pro                   # 混淆规则
-├── gradle/
-│   ├── libs.versions.toml                   # 依赖版本管理
-│   └── wrapper/                             # Gradle Wrapper
-├── build.gradle.kts                         # 项目级配置
-├── settings.gradle.kts                      # 项目设置
-├── gradle.properties                        # Gradle属性
-├── gradlew / gradlew.bat                    # Gradle命令
-└── .gitignore                               # Git忽略
+├── app/src/main/java/com/voicechanger/app/
+│   ├── audio/              # 音频捕获、注入、策略路由
+│   ├── core/
+│   │   ├── audio/          # PCM 工具、重采样、降噪、环形缓冲
+│   │   └── protocol/       # 本地端口协议 (VCP)
+│   ├── domain/             # 数据模型、参数、预设
+│   ├── overlay/            # 悬浮窗控制器
+│   ├── processing/
+│   │   ├── dsp/            # DSP 算法 (FFT, 变调, 效果器)
+│   │   ├── female/         # 男→女专用引擎 (F0 平滑)
+│   │   └── rvc/            # RVC ONNX 引擎
+│   ├── route/              # 音频路由探测与后端
+│   ├── service/            # 前台服务
+│   └── ui/                 # Jetpack Compose 界面
+├── plan/                   # 设计文档
+├── tools/                  # 构建工具、MeanVC 导出脚本
+└── gradle/                 # Gradle 配置
 ```
 
-## 🛠️ 快速开始
+## 🛠️ 构建
 
-### 1. 环境要求
-- ✅ **JDK 17+**（必需）
-- ✅ **Gradle** (已包含 Wrapper)
-- ✅ **Android SDK** (可选，用于完整编译)
-
-### 2. 构建项目
-
-#### 使用 Operit 内置命令按钮
-- 🔧 **初始化 Gradle Wrapper** - 首次使用
-- 🔨 **构建项目** - 编译整个项目
-- 🧹 **清理构建** - 清理构建缓存
-- 📋 **查看所有任务** - 列出可用任务
-
-#### 命令行方式
 ```bash
-# Linux/Mac
-./gradlew build              # 构建项目
-./gradlew assembleDebug      # 打包Debug APK
-./gradlew installDebug       # 安装到设备
-./gradlew clean              # 清理构建
+# ARM64 环境需要先替换 aapt2
+./setup_android_env.sh
 
-# Windows
-gradlew.bat build
-gradlew.bat assembleDebug
-```
+# 构建 Debug APK
+./gradlew assembleDebug --offline
 
-### 3. 生成的APK位置
-```
+# APK 输出
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## 📦 依赖管理
+### 要求
 
-项目使用 **Gradle Version Catalog** 统一管理依赖版本。
+- JDK 17+
+- Android SDK (API 35)
+- Kotlin 2.0+
+- ARM64 环境：需 ReVanced aapt2 替换
 
-### 查看当前依赖
-在 `gradle/libs.versions.toml` 中定义：
+## 📋 版本历史
 
-```toml
-[versions]
-agp = "9.0.0"
-kotlin = "2.3.10"
-composeBom = "2026.01.01"
+### v1.3
+- 新增 6 个 DSP 效果器 (Chorus, Flanger, Tremolo, Telephone, BassBoost, Presence)
+- 新增 5 个音色预设 (歌者/电话音/浑厚低音/天使/电台主播)
+- 强化男→女引擎：F0 时间平滑、临场感提升、输出软饱和
+- RVC ONNX 模型集成
+- UI 3 行预设布局
 
-[libraries]
-androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
-androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
-```
+### v1.2
+- 基础变声功能 (女声/男声/儿童/怪兽/机器人/空灵)
+- SmbPitchShifter 变调引擎
+- Magisk 特权模块部署
+- 前台通知 + 悬浮窗
 
-### 添加新依赖
-1. 在 `gradle/libs.versions.toml` 中添加版本和库定义
-2. 在 `app/build.gradle.kts` 中引用：
-   ```kotlin
-   dependencies {
-       implementation(libs.your.library.name)
-   }
-   ```
+## 📄 License
 
-## 🎨 自定义应用
-
-### 修改应用名称
-编辑 `app/src/main/res/values/strings.xml`：
-```xml
-<string name="app_name">你的应用名</string>
-```
-
-### 修改包名
-1. 更新 `app/build.gradle.kts` 中的 `namespace` 和 `applicationId`
-2. 重命名 `java/com/java/myapplication` 目录结构
-3. 更新 `AndroidManifest.xml` 中的包名引用
-
-### 修改主题颜色
-编辑 `app/src/main/java/.../ui/theme/Color.kt`：
-```kotlin
-val Purple80 = Color(0xFFD0BCFF)  // 修改为你的颜色
-```
-
-## 📱 Compose 示例
-
-当前 `MainActivity.kt` 包含一个简单的 Greeting 示例：
-
-```kotlin
-@Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-    Text(
-        text = "Hello $name!",
-        modifier = modifier
-    )
-}
-```
-
-你可以：
-- 添加更多 Composable 函数
-- 使用 Material3 组件
-- 实现导航（推荐使用 Navigation Compose）
-- 集成 ViewModel、Repository 等架构组件
-
-## 🔧 常用 Gradle 任务
-
-```bash
-./gradlew tasks              # 查看所有可用任务
-./gradlew clean              # 清理构建
-./gradlew build              # 完整构建
-./gradlew assembleDebug      # 构建Debug APK
-./gradlew assembleRelease    # 构建Release APK
-./gradlew installDebug       # 安装Debug到设备
-./gradlew test               # 运行单元测试
-./gradlew connectedAndroidTest # 运行Android测试
-```
-
-## 📝 注意事项
-
-⚠️ **关于 Android SDK**  
-- 此模板可以在 Operit 的 Ubuntu 环境中构建
-- 完整编译需要安装 Android SDK
-- 推荐使用 Android Studio 进行完整开发
-
-### ⚠️ ARM64 环境 AAPT2 替换（模板已内置）
-
-Gradle 会自动从 Google Maven 下载 AAPT2，但官方分发在 ARM64 Linux 环境下不可直接使用。
-此模板已经内置 ARM64 `aapt2`，`setup_android_env.sh` 会自动把它替换到 SDK build-tools 和 Gradle 缓存里。
-
-**模板内置来源**：
-- Release: https://github.com/ReVanced/aapt2/releases/tag/v1.0.0
-- ARM64 aapt2: https://github.com/ReVanced/aapt2/releases/download/v1.0.0/aapt2-arm64-v8a
-- SHA-256: `e5b5ff7f0d4f6ecd7fa5d05d77fed3f09f6f1bf80f078b8aada82bc578848561`
-
-**你只需要执行**
-```bash
-chmod +x ./setup_android_env.sh
-./setup_android_env.sh
-```
-
-脚本会自动完成：
-- 替换 `$ANDROID_SDK/build-tools/35.0.0/aapt2`
-- 替换 `~/.gradle/caches/modules-2/files-2.1/com.android.tools.build/aapt2` 下的 jar 内二进制
-- 替换 `~/.gradle/caches/transforms-*` 中已经解压出来的 `aapt2`
-
-⚠️ **关于包名**  
-- 默认包名为 `com.java.myapplication`
-- 发布前请修改为你的唯一包名
-
-⚠️ **关于签名**  
-- Debug 版本自动使用调试签名
-- Release 版本需要配置签名密钥
-
-## 🌐 相关资源
-
-- [Jetpack Compose 官方文档](https://developer.android.com/jetpack/compose)
-- [Material Design 3](https://m3.material.io/)
-- [Android 开发者指南](https://developer.android.com/)
-- [Kotlin 官方文档](https://kotlinlang.org/)
-
-## 💡 提示
-
-- 使用 `./gradlew --scan` 可以查看详细的构建分析
-- 使用 `./gradlew build --info` 查看详细构建日志
-- 修改 `gradle.properties` 可以调整构建性能
-
-Happy Coding! 🤖✨
+MIT

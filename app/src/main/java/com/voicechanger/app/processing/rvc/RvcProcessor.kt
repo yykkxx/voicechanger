@@ -34,13 +34,15 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
     companion object {
         private const val TAG = "VC/RvcProc"
         private const val OUT_RING = Rvc.SAMPLE_RATE * 3
-        /** 默认升调（八度）：男声 ~110 Hz → 女声 ~220 Hz。 */
-        const val DEFAULT_F0_UP_SEMITONES = 12f
+        /** 默认升调（半音）：+5 度，男声→自然女声（非八度花栗鼠）。 */
+        const val DEFAULT_F0_UP_SEMITONES = 5f
         private const val STAT_EVERY = 5
-        /** F0 指数滑动平均系数（越小越平滑，0.3 = 70% 旧值 + 30% 新值）。 */
-        private const val F0_SMOOTH_ALPHA = 0.3f
-        /** 交叉淡入淡出长度（样本数，约 2ms @ 48kHz ≈ 96 样本）。 */
-        private const val XFADE_SAMPLES = 96
+        /** F0 指数滑动平均系数（越小越平滑，0.15 = 85% 旧值 + 15% 新值）。 */
+        private const val F0_SMOOTH_ALPHA = 0.15f
+        /** 交叉淡入淡出长度（样本数，约 4ms @ 48kHz ≈ 192 样本）。 */
+        private const val XFADE_SAMPLES = 192
+        /** 输出预填充量（样本）：约 200ms，防止推理启动时 underrun。 */
+        private const val PREFILL_SAMPLES = Rvc.SAMPLE_RATE / 5
     }
 
     /** RVC 音色预设：不同 speaker ID + f0 调整量。 */
@@ -50,13 +52,13 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
         val f0Semitones: Float,
         val description: String,
     ) {
-        FEMALE_SOFT("女声·柔和", 0, 12f, "升八度，speaker 0，柔和自然女声"),
-        FEMALE_SWEET("女声·甜美", 1, 12f, "升八度，speaker 1，甜美年轻女声"),
-        FEMALE_MATURE("女声·成熟", 2, 8f, "升 5 度，speaker 2，成熟低沉女声"),
-        MALE_DEEP("男声·浑厚", 10, -5f, "降 3 度，speaker 10，浑厚男声"),
+        FEMALE_SOFT("女声·柔和", 0, 5f, "+5半音，speaker 0，柔和自然女声"),
+        FEMALE_SWEET("女声·甜美", 1, 6f, "+6半音，speaker 1，甜美年轻女声"),
+        FEMALE_MATURE("女声·成熟", 2, 3f, "+3半音，speaker 2，成熟低沉女声"),
+        MALE_DEEP("男声·浑厚", 10, -5f, "-5半音，speaker 10，浑厚男声"),
         MALE_YOUNG("男声·少年", 11, 0f, "不调调，speaker 11，清亮少年音"),
-        CHILD("童声", 20, 12f, "升八度，speaker 20，孩童声线"),
-        ELDERLY("老人声", 30, -3f, "降 2 度，speaker 30，苍老声线"),
+        CHILD("童声", 20, 8f, "+8半音，speaker 20，孩童声线"),
+        ELDERLY("老人声", 30, -3f, "-3半音，speaker 30，苍老声线"),
         ;
     }
 
@@ -124,6 +126,15 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
     /** F0 平滑状态：上一帧的 f0 值（Hz）。 */
     private var f0Smoothed = 0f
 
+    /** 是否已预填充输出缓冲（推理首次产出前先静音填充，避免音频线程一开始就 underrun → 卡顿）。 */
+    private var prefilled = false
+    /** 欠载计数（供统计）。 */
+    @Volatile
+    var underruns: Int = 0
+        private set
+    /** 上一次输出的最后一个样本值（欠载时做保持/插值，避免硬切静音）。 */
+    private var lastOutSample: Float = 0f
+
     // 统计
     private var nStat = 0
     private var sumMel = 0L
@@ -184,6 +195,11 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
             System.arraycopy(input, 0, output, 0, length)
             return length
         }
+        // 首次：预填充输出缓冲为零，避免音频线程立即 underrun
+        if (!prefilled) {
+            for (i in 0 until PREFILL_SAMPLES) push(0f)
+            prefilled = true
+        }
         var i = 0
         while (i < length) {
             if (decimCount % 3 == 0) {
@@ -200,10 +216,17 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
         var produced = 0
         while (produced < length && outRead != outWrite) {
             val v = outRing[outRead] * 32767f
+            lastOutSample = outRing[outRead]
             output[produced++] = v.coerceIn(-32768f, 32767f).toInt().toShort()
             outRead = (outRead + 1) % OUT_RING
         }
-        while (produced < length) output[produced++] = 0
+        // 欠载：用上一个样本的衰减保持（而非硬切静音），减少卡顿感
+        while (produced < length) {
+            underruns++
+            lastOutSample *= 0.92f  // 缓慢衰减
+            val v = (lastOutSample * 32767f).toInt().coerceIn(-32768, 32767).toShort()
+            output[produced++] = v
+        }
         return length
     }
 
@@ -276,12 +299,20 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
         for (i in f0.indices) if (f0[i] > 0f) f0[i] *= ratio
         val pitch = Rvc.f0ToCoarse(f0)
 
-        // 3) HuBERT → ×2 上采样到 L 帧
+        // 3) HuBERT → ×2 线性插值上采样到 L 帧（最近邻会丢失时域精度 → 音色发木）
         val feats = e.hubertFeatures(wav16k)
         val phone = FloatArray(v.frames * 768)
         for (i in 0 until v.frames) {
-            val src = feats[(i / 2).coerceAtMost(feats.size - 1)]
-            System.arraycopy(src, 0, phone, i * 768, 768)
+            // 50Hz 特征 → 100Hz 帧，线性插值
+            val srcPos = i * 0.5f
+            val i0 = srcPos.toInt().coerceIn(0, feats.size - 1)
+            val i1 = (i0 + 1).coerceAtMost(feats.size - 1)
+            val w = srcPos - i0
+            val a = feats[i0]
+            val b = feats[i1]
+            for (d in 0 until 768) {
+                phone[i * 768 + d] = a[d] + (b[d] - a[d]) * w
+            }
         }
         val t2 = System.nanoTime()
 
@@ -381,6 +412,9 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
         outWrite = 0; outRead = 0
         hasPrevTail = false
         f0Smoothed = 0f
+        prefilled = false
+        lastOutSample = 0f
+        underruns = 0
         java.util.Arrays.fill(prevTail, 0f)
     }
 

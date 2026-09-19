@@ -339,9 +339,9 @@ class VoiceChangerService : Service() {
                 }
             ProcessorMode.MUTE -> MuteProcessor()
         }
-        // AI 声线转换默认「男声→女声」：升八度（男 ~110Hz → 女 ~220Hz）
+        // AI 声线转换默认「男声→女声」：+5 半音（男 ~110Hz → ~147Hz 女声区）
         val effectParams = if (newConfig.mode == ProcessorMode.AI_MEANVC && newConfig.effects.pitchSemitones == 0f) {
-            newConfig.effects.copy(pitchSemitones = 12f, eqTiltDb = 2f, formantRatio = 1.25f)
+            newConfig.effects.copy(pitchSemitones = 5f, eqTiltDb = 2f, formantRatio = 1.25f)
                 .also {
                     config = config.copy(effects = it)
                     CurrentParams.effects = it

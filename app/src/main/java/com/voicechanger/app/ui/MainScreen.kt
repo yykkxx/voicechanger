@@ -204,6 +204,8 @@ private fun VoiceTab(
     // UI 参数（本地编辑 + 发送到服务）
     var effects by remember { mutableStateOf(CurrentParams.effects) }
     var preset by remember { mutableStateOf(CurrentParams.preset) }
+    // RVC 音色预设选中状态
+    var rvcPreset by remember { mutableStateOf(com.voicechanger.app.processing.rvc.RvcProcessor.RvcVoicePreset.FEMALE_SOFT) }
 
     fun pushEffects(next: EffectParams) {
         effects = next
@@ -365,7 +367,7 @@ private fun VoiceTab(
                                         preset = VoicePreset.CUSTOM
                                         pushEffects(
                                             effects.copy(
-                                                pitchSemitones = 12f,
+                                                pitchSemitones = 5f,
                                                 eqTiltDb = 2f,
                                                 formantRatio = 1.25f,
                                             )
@@ -453,15 +455,16 @@ private fun VoiceTab(
                         ) {
                             rvcPresets.take(4).forEach { p ->
                                 FilterChip(
-                                    selected = false,
+                                    selected = rvcPreset == p,
                                     onClick = {
+                                        rvcPreset = p
                                         service?.let { svc ->
                                             val proc = svc.currentProcessor
                                             if (proc is com.voicechanger.app.processing.rvc.RvcProcessor) {
                                                 proc.setVoicePreset(p)
-                                                pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
                                             }
                                         }
+                                        pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
                                     },
                                     label = { Text(p.label, fontSize = 11.sp) },
                                     colors = FilterChipDefaults.filterChipColors(
@@ -476,15 +479,16 @@ private fun VoiceTab(
                         ) {
                             rvcPresets.drop(4).forEach { p ->
                                 FilterChip(
-                                    selected = false,
+                                    selected = rvcPreset == p,
                                     onClick = {
+                                        rvcPreset = p
                                         service?.let { svc ->
                                             val proc = svc.currentProcessor
                                             if (proc is com.voicechanger.app.processing.rvc.RvcProcessor) {
                                                 proc.setVoicePreset(p)
-                                                pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
                                             }
                                         }
+                                        pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
                                     },
                                     label = { Text(p.label, fontSize = 11.sp) },
                                     colors = FilterChipDefaults.filterChipColors(
@@ -499,7 +503,7 @@ private fun VoiceTab(
                         }
                         rvcProc?.let { rp ->
                             Text(
-                                "状态: ${rp.status} | 后端: ${rp.backendLabel} | 推理: ${rp.inferMs.toInt()}ms",
+                                "状态: ${rp.status} | 后端: ${rp.backendLabel} | 推理: ${rp.inferMs.toInt()}ms | underrun: ${rp.underruns}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline,
                             )

@@ -438,6 +438,80 @@ private fun VoiceTab(
                             pushEffects(effects.copy(formantRatio = v))
                         }
                     }
+                    // ---- AI 模式：RVC 音色选择 ----
+                    if (selectedMode == ProcessorMode.AI_MEANVC) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "AI 声线（RVC Speaker）",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        val rvcPresets = com.voicechanger.app.processing.rvc.RvcProcessor.RvcVoicePreset.entries
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            rvcPresets.take(4).forEach { p ->
+                                FilterChip(
+                                    selected = false,
+                                    onClick = {
+                                        service?.let { svc ->
+                                            val proc = svc.currentProcessor
+                                            if (proc is com.voicechanger.app.processing.rvc.RvcProcessor) {
+                                                proc.setVoicePreset(p)
+                                                pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
+                                            }
+                                        }
+                                    },
+                                    label = { Text(p.label, fontSize = 11.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = Color(0xFF7C4DFF).copy(alpha = 0.2f),
+                                    ),
+                                )
+                            }
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            rvcPresets.drop(4).forEach { p ->
+                                FilterChip(
+                                    selected = false,
+                                    onClick = {
+                                        service?.let { svc ->
+                                            val proc = svc.currentProcessor
+                                            if (proc is com.voicechanger.app.processing.rvc.RvcProcessor) {
+                                                proc.setVoicePreset(p)
+                                                pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
+                                            }
+                                        }
+                                    },
+                                    label = { Text(p.label, fontSize = 11.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = Color(0xFF7C4DFF).copy(alpha = 0.2f),
+                                    ),
+                                )
+                            }
+                        }
+                        // RVC 状态信息
+                        val rvcProc = service?.let { svc ->
+                            svc.currentProcessor as? com.voicechanger.app.processing.rvc.RvcProcessor
+                        }
+                        rvcProc?.let { rp ->
+                            Text(
+                                "状态: ${rp.status} | 后端: ${rp.backendLabel} | 推理: ${rp.inferMs.toInt()}ms",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
+                        } ?: run {
+                            val rvcStatus = com.voicechanger.app.processing.rvc.RvcStatus.describe(context)
+                            Text(
+                                "模型: $rvcStatus",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
+                        }
+                    }
                     if (selectedMode == ProcessorMode.INTERNAL) {
                         ParamSlider("机器人感", effects.robotAmount, 0f, 1f, "") { v ->
                             pushEffects(effects.copy(robotAmount = v))

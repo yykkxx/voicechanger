@@ -9,7 +9,7 @@ import java.io.File
 import kotlin.math.pow
 
 /**
- * RVC AI 声线转换处理器（男→女），低延迟滑动窗设计。
+ * RVC AI 声线转换处理器，低延迟滑动窗设计。
  *
  * ```text
  * 48k 帧 → 3:1 降采样 → 16k 环形缓冲
@@ -26,16 +26,43 @@ import kotlin.math.pow
  * - 延迟 ≈ (L - step)·10ms + 单次推理耗时；L=32/step=16 → ~160ms + 推理；
  * - 推理在后臺线程执行，不阻塞音频线程；欠载时输出静音；
  * - 后端按 NPU → GPU → CPU 自动选择（见 [RvcBackend]），并记录每级耗时。
+ * - F0 时间平滑（指数滑动平均 α=0.3），消除帧间跳变爆音；
+ * - 输出帧拼接处做交叉淡入淡出（2ms），消除 click 噪声。
  */
 class RvcProcessor(private val context: Context) : ProcessorEngine {
 
     companion object {
         private const val TAG = "VC/RvcProc"
         private const val OUT_RING = Rvc.SAMPLE_RATE * 3
-        /** 男→女默认升调（八度）：男声 ~110 Hz → 女声 ~220 Hz。 */
+        /** 默认升调（八度）：男声 ~110 Hz → 女声 ~220 Hz。 */
         const val DEFAULT_F0_UP_SEMITONES = 12f
         private const val STAT_EVERY = 5
+        /** F0 指数滑动平均系数（越小越平滑，0.3 = 70% 旧值 + 30% 新值）。 */
+        private const val F0_SMOOTH_ALPHA = 0.3f
+        /** 交叉淡入淡出长度（样本数，约 2ms @ 48kHz ≈ 96 样本）。 */
+        private const val XFADE_SAMPLES = 96
     }
+
+    /** RVC 音色预设：不同 speaker ID + f0 调整量。 */
+    enum class RvcVoicePreset(
+        val label: String,
+        val speakerId: Long,
+        val f0Semitones: Float,
+        val description: String,
+    ) {
+        FEMALE_SOFT("女声·柔和", 0, 12f, "升八度，speaker 0，柔和自然女声"),
+        FEMALE_SWEET("女声·甜美", 1, 12f, "升八度，speaker 1，甜美年轻女声"),
+        FEMALE_MATURE("女声·成熟", 2, 8f, "升 5 度，speaker 2，成熟低沉女声"),
+        MALE_DEEP("男声·浑厚", 10, -5f, "降 3 度，speaker 10，浑厚男声"),
+        MALE_YOUNG("男声·少年", 11, 0f, "不调调，speaker 11，清亮少年音"),
+        CHILD("童声", 20, 12f, "升八度，speaker 20，孩童声线"),
+        ELDERLY("老人声", 30, -3f, "降 2 度，speaker 30，苍老声线"),
+        ;
+    }
+
+    @Volatile
+    var currentVoicePreset: RvcVoicePreset = RvcVoicePreset.FEMALE_SOFT
+        private set
 
     @Volatile
     var status: String = "未初始化"
@@ -89,6 +116,14 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
     private var outWrite = 0
     private var outRead = 0
 
+    /** 上一段推理输出的尾部样本，用于下一段的交叉淡入淡出。 */
+    private val prevTail = FloatArray(XFADE_SAMPLES)
+    /** 是否有上一段（首次推理时无交叉淡入淡出）。 */
+    private var hasPrevTail = false
+
+    /** F0 平滑状态：上一帧的 f0 值（Hz）。 */
+    private var f0Smoothed = 0f
+
     // 统计
     private var nStat = 0
     private var sumMel = 0L
@@ -126,6 +161,17 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
 
     override fun update(params: EffectParams) {
         f0UpKey = if (params.pitchSemitones == 0f) DEFAULT_F0_UP_SEMITONES else params.pitchSemitones
+    }
+
+    /** 切换 RVC 音色预设。 */
+    fun setVoicePreset(preset: RvcVoicePreset) {
+        currentVoicePreset = preset
+        sid = preset.speakerId
+        f0UpKey = preset.f0Semitones
+        engine?.setSpeaker(preset.speakerId)
+        f0Smoothed = 0f
+        hasPrevTail = false
+        Log.i(TAG, "voice preset: ${preset.label} (sid=${preset.speakerId} f0=${preset.f0Semitones})")
     }
 
     fun setSpeaker(id: Long) {
@@ -210,7 +256,22 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
         val f0 = FloatArray(v.frames) { i -> if (i < f0raw.size) f0raw[i] else 0f }
         val t1 = System.nanoTime()
 
-        // 2) 升调（男→女）
+        // 1.5) F0 时间平滑：指数滑动平均，消除帧间跳变
+        for (i in f0.indices) {
+            val target = f0[i]
+            if (f0Smoothed <= 0f && target > 0f) {
+                f0Smoothed = target
+            } else if (target > 0f) {
+                f0Smoothed = f0Smoothed * (1f - F0_SMOOTH_ALPHA) + target * F0_SMOOTH_ALPHA
+            } else {
+                // 静音帧：快速衰减
+                f0Smoothed *= 0.5f
+                if (f0Smoothed < 1f) f0Smoothed = 0f
+            }
+            f0[i] = f0Smoothed
+        }
+
+        // 2) 升调
         val ratio = 2f.pow(f0UpKey / 12f)
         for (i in f0.indices) if (f0[i] > 0f) f0[i] *= ratio
         val pitch = Rvc.f0ToCoarse(f0)
@@ -254,29 +315,56 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
         return audio
     }
 
-    /** 输出尾部 [fromFrames] 之后的帧；32k 模型（320 样本/帧）线性重采样到 48k（480 样本/帧）。 */
+    /** 输出尾部 [fromFrames] 之后的帧；32k 模型（320 样本/帧）线性重采样到 48k（480 样本/帧）。
+     *  段间交叉淡入淡出（XFADE_SAMPLES 样本），消除拼接 click。 */
     private fun pushOut(audio: FloatArray, fromFrames: Int, v: Rvc.Variant) {
         val spf = v.samplesPerFrame
+        // 先收集所有要输出的样本（可能经过重采样）
+        val outSamples = FloatArray((v.frames - fromFrames.coerceAtLeast(0)) * Rvc.HOP)
+        var outIdx = 0
+
         if (spf == Rvc.HOP) {
             var i = (fromFrames * spf).coerceAtLeast(0)
-            while (i < audio.size) {
-                if (!push(audio[i])) return
+            while (i < audio.size && outIdx < outSamples.size) {
+                outSamples[outIdx++] = audio[i]
                 i++
             }
-            return
-        }
-        val ratio = spf.toFloat() / Rvc.HOP
-        for (f in fromFrames.coerceAtLeast(0) until v.frames) {
-            val base = f * spf
-            if (base + spf > audio.size) break
-            for (k in 0 until Rvc.HOP) {
-                val pos = k * ratio
-                val i0 = pos.toInt()
-                val i1 = (i0 + 1).coerceAtMost(spf - 1)
-                val w = pos - i0
-                val s = audio[base + i0] + (audio[base + i1] - audio[base + i0]) * w
-                if (!push(s)) return
+        } else {
+            val ratio = spf.toFloat() / Rvc.HOP
+            for (f in fromFrames.coerceAtLeast(0) until v.frames) {
+                val base = f * spf
+                if (base + spf > audio.size) break
+                for (k in 0 until Rvc.HOP) {
+                    if (outIdx >= outSamples.size) break
+                    val pos = k * ratio
+                    val i0 = pos.toInt()
+                    val i1 = (i0 + 1).coerceAtMost(spf - 1)
+                    val w = pos - i0
+                    outSamples[outIdx++] = audio[base + i0] + (audio[base + i1] - audio[base + i0]) * w
+                }
             }
+        }
+
+        // 交叉淡入淡出：与上一段尾部做 XFADE_SAMPLES 样本的交叉淡入
+        val fadeLen = minOf(XFADE_SAMPLES, outIdx, prevTail.size)
+        if (hasPrevTail && fadeLen > 0) {
+            for (i in 0 until fadeLen) {
+                val w = i.toFloat() / fadeLen  // 0→1
+                outSamples[i] = prevTail[i] * (1f - w) + outSamples[i] * w
+            }
+        }
+
+        // 写入输出环形缓冲
+        for (i in 0 until outIdx) {
+            if (!push(outSamples[i])) break
+        }
+
+        // 保存当前段尾部到 prevTail
+        val tailStart = (outIdx - XFADE_SAMPLES).coerceAtLeast(0)
+        val tailLen = outIdx - tailStart
+        if (tailLen > 0) {
+            System.arraycopy(outSamples, tailStart, prevTail, XFADE_SAMPLES - tailLen, tailLen)
+            hasPrevTail = true
         }
     }
 
@@ -291,6 +379,9 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
     private fun resetRings() {
         inWrite = 0; inRead = 0; decimCount = 0
         outWrite = 0; outRead = 0
+        hasPrevTail = false
+        f0Smoothed = 0f
+        java.util.Arrays.fill(prevTail, 0f)
     }
 
     override fun reset(discontinuity: Boolean) = resetRings()

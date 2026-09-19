@@ -130,6 +130,8 @@ class VoiceChangerService : Service() {
     private var pipeline: AudioPipeline? = null
     private var capture: CaptureEndpoint? = null
     private var processor: ProcessorEngine? = null
+    /** 暴露当前处理器供 UI 查询状态。 */
+    val currentProcessor: ProcessorEngine? get() = processor
     private var monitorInjector: InjectionEndpoint? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var metricsJob: Job? = null

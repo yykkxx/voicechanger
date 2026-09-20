@@ -17,6 +17,12 @@ enum class ProcessorMode {
     /** AI 声线转换（OpenVoice V2，轻量 zero-shot 音色克隆）。 */
     AI_OPENVOICE,
 
+    /** AI 声线转换（FreeVC，基于 VITS 的轻量语音转换）。 */
+    AI_FREEVC,
+
+    /** AI 声线转换（DDSP-SVC，超轻量可微分 DSP，极低延迟）。 */
+    AI_DDSP,
+
     /** 故障安全：输出静音。 */
     MUTE,
 }

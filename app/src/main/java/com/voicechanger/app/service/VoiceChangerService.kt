@@ -250,7 +250,9 @@ class VoiceChangerService : Service() {
             ProcessorMode.PASSTHROUGH -> ProcessorMode.INTERNAL
             ProcessorMode.INTERNAL -> ProcessorMode.AI_MEANVC
             ProcessorMode.AI_MEANVC -> ProcessorMode.AI_OPENVOICE
-            ProcessorMode.AI_OPENVOICE -> ProcessorMode.LOOPBACK_SOCKET
+            ProcessorMode.AI_OPENVOICE -> ProcessorMode.AI_FREEVC
+            ProcessorMode.AI_FREEVC -> ProcessorMode.AI_DDSP
+            ProcessorMode.AI_DDSP -> ProcessorMode.LOOPBACK_SOCKET
             ProcessorMode.LOOPBACK_SOCKET -> ProcessorMode.MUTE
             ProcessorMode.MUTE -> ProcessorMode.PASSTHROUGH
         }
@@ -345,10 +347,19 @@ class VoiceChangerService : Service() {
                 } else {
                     com.voicechanger.app.processing.female.FemaleVoiceProcessor()
                 }
+            // AI 声线转换：FreeVC（基于 VITS，~50MB）；模型缺失时回退女声引擎
+            ProcessorMode.AI_FREEVC ->
+                if (com.voicechanger.app.processing.freevc.FreeVc.isReady(this)) {
+                    com.voicechanger.app.processing.freevc.FreeVcProcessor(this)
+                } else {
+                    com.voicechanger.app.processing.female.FemaleVoiceProcessor()
+                }
+            // AI 声线转换：DDSP-SVC（超轻量，~10MB 或无模型用谐波合成）；总是可用
+            ProcessorMode.AI_DDSP -> com.voicechanger.app.processing.ddsp.DdspProcessor(this)
             ProcessorMode.MUTE -> MuteProcessor()
         }
         // AI 声线转换默认「男声→女声」：+5 半音（男 ~110Hz → ~147Hz 女声区）
-        val effectParams = if ((newConfig.mode == ProcessorMode.AI_MEANVC || newConfig.mode == ProcessorMode.AI_OPENVOICE) && newConfig.effects.pitchSemitones == 0f) {
+        val effectParams = if ((newConfig.mode == ProcessorMode.AI_MEANVC || newConfig.mode == ProcessorMode.AI_OPENVOICE || newConfig.mode == ProcessorMode.AI_FREEVC || newConfig.mode == ProcessorMode.AI_DDSP) && newConfig.effects.pitchSemitones == 0f) {
             newConfig.effects.copy(pitchSemitones = 5f, eqTiltDb = 2f, formantRatio = 1.25f)
                 .also {
                     config = config.copy(effects = it)
@@ -713,6 +724,8 @@ class VoiceChangerService : Service() {
         ProcessorMode.INTERNAL -> "变声"
         ProcessorMode.AI_MEANVC -> "AI声线(RVC)"
         ProcessorMode.AI_OPENVOICE -> "AI声线(OV)"
+        ProcessorMode.AI_FREEVC -> "AI声线(FC)"
+        ProcessorMode.AI_DDSP -> "AI声线(DDSP)"
         ProcessorMode.LOOPBACK_SOCKET -> "外部"
         ProcessorMode.MUTE -> "静音"
     }

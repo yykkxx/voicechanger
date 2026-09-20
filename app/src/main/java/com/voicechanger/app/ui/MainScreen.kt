@@ -208,6 +208,10 @@ private fun VoiceTab(
     var rvcPreset by remember { mutableStateOf(com.voicechanger.app.processing.rvc.RvcProcessor.RvcVoicePreset.FEMALE_SOFT) }
     // OpenVoice 音色预设选中状态
     var ovPreset by remember { mutableStateOf(com.voicechanger.app.processing.openvoice.OpenVoiceProcessor.OvVoicePreset.FEMALE) }
+    // FreeVC 音色预设选中状态
+    var freevcPreset by remember { mutableStateOf(com.voicechanger.app.processing.freevc.FreeVcProcessor.FreeVcPreset.FEMALE_NATURAL) }
+    // DDSP 音色预设选中状态
+    var ddspPreset by remember { mutableStateOf(com.voicechanger.app.processing.ddsp.DdspProcessor.DdspPreset.FEMALE_SOFT) }
 
     fun pushEffects(next: EffectParams) {
         effects = next
@@ -365,7 +369,7 @@ private fun VoiceTab(
                                     onSelectMode(mode)
                                     // AI 声线转换首版聚焦「男声→女声」：切换到该模式且音调未调整时，
                                     // 自动应用 +5 半音 / +2 dB 明亮度 / 1.25 共振峰 的女性化预处理
-                                    if ((mode == ProcessorMode.AI_MEANVC || mode == ProcessorMode.AI_OPENVOICE) && effects.pitchSemitones == 0f) {
+                                    if ((mode == ProcessorMode.AI_MEANVC || mode == ProcessorMode.AI_OPENVOICE || mode == ProcessorMode.AI_FREEVC || mode == ProcessorMode.AI_DDSP) && effects.pitchSemitones == 0f) {
                                         preset = VoicePreset.CUSTOM
                                         pushEffects(
                                             effects.copy(
@@ -429,7 +433,7 @@ private fun VoiceTab(
                     }
 
                     // ---- 参数滑杆 ----
-                    if (selectedMode == ProcessorMode.INTERNAL || selectedMode == ProcessorMode.AI_MEANVC || selectedMode == ProcessorMode.AI_OPENVOICE) {
+                    if (selectedMode == ProcessorMode.INTERNAL || selectedMode == ProcessorMode.AI_MEANVC || selectedMode == ProcessorMode.AI_OPENVOICE || selectedMode == ProcessorMode.AI_FREEVC || selectedMode == ProcessorMode.AI_DDSP) {
                         ParamSlider("音调", effects.pitchSemitones, -12f, 12f, "半音") { v ->
                             preset = VoicePreset.detect(effects.copy(pitchSemitones = v))
                             pushEffects(effects.copy(pitchSemitones = v))
@@ -592,6 +596,82 @@ private fun VoiceTab(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline,
                             )
+                        }
+                    }
+                    // ---- AI 模式：FreeVC 音色选择 ----
+                    if (selectedMode == ProcessorMode.AI_FREEVC) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "AI 声线（FreeVC）",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        val fcPresets = com.voicechanger.app.processing.freevc.FreeVcProcessor.FreeVcPreset.entries
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            fcPresets.take(3).forEach { p ->
+                                FilterChip(selected = freevcPreset == p, onClick = {
+                                    freevcPreset = p
+                                    service?.let { svc -> (svc.currentProcessor as? com.voicechanger.app.processing.freevc.FreeVcProcessor)?.setVoicePreset(p) }
+                                    pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
+                                }, label = { Text(p.label, fontSize = 11.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Color(0xFF00BCD4).copy(alpha = 0.2f)))
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            fcPresets.drop(3).forEach { p ->
+                                FilterChip(selected = freevcPreset == p, onClick = {
+                                    freevcPreset = p
+                                    service?.let { svc -> (svc.currentProcessor as? com.voicechanger.app.processing.freevc.FreeVcProcessor)?.setVoicePreset(p) }
+                                    pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
+                                }, label = { Text(p.label, fontSize = 11.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Color(0xFF00BCD4).copy(alpha = 0.2f)))
+                            }
+                        }
+                        val fcProc = service?.let { svc -> svc.currentProcessor as? com.voicechanger.app.processing.freevc.FreeVcProcessor }
+                        fcProc?.let { fp ->
+                            Text("状态: ${fp.status} | 后端: ${fp.backendLabel} | 推理: ${fp.inferMs.toInt()}ms | underrun: ${fp.underruns}",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                        } ?: run {
+                            val fcStatus = com.voicechanger.app.processing.freevc.FreeVcStatus.describe(context)
+                            Text("模型: $fcStatus", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                        }
+                    }
+                    // ---- AI 模式：DDSP-SVC 音色选择 ----
+                    if (selectedMode == ProcessorMode.AI_DDSP) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "AI 声线（DDSP-SVC · 超轻量）",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        val ddPresets = com.voicechanger.app.processing.ddsp.DdspProcessor.DdspPreset.entries
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ddPresets.take(3).forEach { p ->
+                                FilterChip(selected = ddspPreset == p, onClick = {
+                                    ddspPreset = p
+                                    service?.let { svc -> (svc.currentProcessor as? com.voicechanger.app.processing.ddsp.DdspProcessor)?.setVoicePreset(p) }
+                                    pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
+                                }, label = { Text(p.label, fontSize = 11.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Color(0xFFFF9800).copy(alpha = 0.2f)))
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ddPresets.drop(3).forEach { p ->
+                                FilterChip(selected = ddspPreset == p, onClick = {
+                                    ddspPreset = p
+                                    service?.let { svc -> (svc.currentProcessor as? com.voicechanger.app.processing.ddsp.DdspProcessor)?.setVoicePreset(p) }
+                                    pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
+                                }, label = { Text(p.label, fontSize = 11.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Color(0xFFFF9800).copy(alpha = 0.2f)))
+                            }
+                        }
+                        val ddProc = service?.let { svc -> svc.currentProcessor as? com.voicechanger.app.processing.ddsp.DdspProcessor }
+                        ddProc?.let { dp ->
+                            Text("状态: ${dp.status} | 后端: ${dp.backendLabel} | 推理: ${dp.inferMs.toInt()}ms | underrun: ${dp.underruns}",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                        } ?: run {
+                            val ddStatus = com.voicechanger.app.processing.ddsp.DdspStatus.describe(context)
+                            Text("模型: $ddStatus", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
                         }
                     }
                     if (selectedMode == ProcessorMode.INTERNAL) {
@@ -852,6 +932,8 @@ private fun modeLabel(mode: ProcessorMode): String = when (mode) {
     ProcessorMode.INTERNAL -> "内部变声（推荐）"
     ProcessorMode.AI_MEANVC -> "AI 声线转换（RVC）"
     ProcessorMode.AI_OPENVOICE -> "AI 声线转换（OpenVoice）"
+    ProcessorMode.AI_FREEVC -> "AI 声线转换（FreeVC）"
+    ProcessorMode.AI_DDSP -> "AI 声线转换（DDSP-SVC）"
     ProcessorMode.LOOPBACK_SOCKET -> "外部端口处理"
     ProcessorMode.MUTE -> "静音（测试用）"
 }

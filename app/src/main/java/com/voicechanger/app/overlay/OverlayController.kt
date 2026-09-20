@@ -352,6 +352,8 @@ class OverlayController(private val context: Context) {
             ProcessorMode.INTERNAL -> "变声"
             ProcessorMode.AI_MEANVC -> "AI声线"
             ProcessorMode.AI_OPENVOICE -> "AI(OV)"
+            ProcessorMode.AI_FREEVC -> "AI(FC)"
+            ProcessorMode.AI_DDSP -> "AI(DSP)"
             ProcessorMode.LOOPBACK_SOCKET -> "外部"
             ProcessorMode.MUTE -> "静音"
         }
@@ -382,6 +384,8 @@ class OverlayController(private val context: Context) {
             ProcessorMode.INTERNAL -> "变声"
             ProcessorMode.AI_MEANVC -> "AI声线"
             ProcessorMode.AI_OPENVOICE -> "AI(OV)"
+            ProcessorMode.AI_FREEVC -> "AI(FC)"
+            ProcessorMode.AI_DDSP -> "AI(DSP)"
             ProcessorMode.LOOPBACK_SOCKET -> "外部"
             ProcessorMode.MUTE -> "静音"
         }

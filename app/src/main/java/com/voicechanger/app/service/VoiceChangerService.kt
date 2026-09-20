@@ -249,7 +249,8 @@ class VoiceChangerService : Service() {
         val next = when (current) {
             ProcessorMode.PASSTHROUGH -> ProcessorMode.INTERNAL
             ProcessorMode.INTERNAL -> ProcessorMode.AI_MEANVC
-            ProcessorMode.AI_MEANVC -> ProcessorMode.LOOPBACK_SOCKET
+            ProcessorMode.AI_MEANVC -> ProcessorMode.AI_OPENVOICE
+            ProcessorMode.AI_OPENVOICE -> ProcessorMode.LOOPBACK_SOCKET
             ProcessorMode.LOOPBACK_SOCKET -> ProcessorMode.MUTE
             ProcessorMode.MUTE -> ProcessorMode.PASSTHROUGH
         }
@@ -337,10 +338,17 @@ class VoiceChangerService : Service() {
                 } else {
                     com.voicechanger.app.processing.female.FemaleVoiceProcessor()
                 }
+            // AI 声线转换：OpenVoice V2（轻量 zero-shot，~30MB）；模型缺失时回退女声引擎
+            ProcessorMode.AI_OPENVOICE ->
+                if (com.voicechanger.app.processing.openvoice.OpenVoice.isReady(this)) {
+                    com.voicechanger.app.processing.openvoice.OpenVoiceProcessor(this)
+                } else {
+                    com.voicechanger.app.processing.female.FemaleVoiceProcessor()
+                }
             ProcessorMode.MUTE -> MuteProcessor()
         }
         // AI 声线转换默认「男声→女声」：+5 半音（男 ~110Hz → ~147Hz 女声区）
-        val effectParams = if (newConfig.mode == ProcessorMode.AI_MEANVC && newConfig.effects.pitchSemitones == 0f) {
+        val effectParams = if ((newConfig.mode == ProcessorMode.AI_MEANVC || newConfig.mode == ProcessorMode.AI_OPENVOICE) && newConfig.effects.pitchSemitones == 0f) {
             newConfig.effects.copy(pitchSemitones = 5f, eqTiltDb = 2f, formantRatio = 1.25f)
                 .also {
                     config = config.copy(effects = it)
@@ -703,7 +711,8 @@ class VoiceChangerService : Service() {
     private fun modeLabel(mode: ProcessorMode): String = when (mode) {
         ProcessorMode.PASSTHROUGH -> "直通"
         ProcessorMode.INTERNAL -> "变声"
-        ProcessorMode.AI_MEANVC -> "AI声线"
+        ProcessorMode.AI_MEANVC -> "AI声线(RVC)"
+        ProcessorMode.AI_OPENVOICE -> "AI声线(OV)"
         ProcessorMode.LOOPBACK_SOCKET -> "外部"
         ProcessorMode.MUTE -> "静音"
     }

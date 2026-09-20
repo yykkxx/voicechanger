@@ -14,6 +14,9 @@ enum class ProcessorMode {
     /** AI 声线转换（RVC 开源模型，NPU→GPU→CPU 自动选路）。 */
     AI_MEANVC,
 
+    /** AI 声线转换（OpenVoice V2，轻量 zero-shot 音色克隆）。 */
+    AI_OPENVOICE,
+
     /** 故障安全：输出静音。 */
     MUTE,
 }

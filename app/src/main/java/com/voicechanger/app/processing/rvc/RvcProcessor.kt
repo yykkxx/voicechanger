@@ -12,11 +12,11 @@ import kotlin.math.pow
  * RVC AI 声线转换处理器，低延迟滑动窗设计。
  *
  * ```text
- * 48k 帧 → 3:1 降采样 → 16k 环形缓冲
+ * 48k 帧 → 3:1 抗混叠降采样 → 16k 环形缓冲
  *   推理线程（滑动窗）：
  *     window = 最近 L 帧（160·L 样本）
  *       mel128 → RMVPE → f0 ×2^(n/12) → pitch/nsff0
- *       HuBERT(50Hz×768) → ×2 上采样 → phone[L,768]
+ *       HuBERT(50Hz×768) → ×2 线性插值 → phone[L,768]
  *       net_g48k → L·480 样本（48k）
  *     只取「尾部 step 帧」作为输出（含左侧上下文，边界连续）
  *     窗口前进 step 帧
@@ -24,10 +24,11 @@ import kotlin.math.pow
  * ```
  *
  * - 延迟 ≈ (L - step)·10ms + 单次推理耗时；L=32/step=16 → ~160ms + 推理；
- * - 推理在后臺线程执行，不阻塞音频线程；欠载时输出静音；
+ * - 推理在后台线程执行，不阻塞音频线程；欠载时衰减保持；
  * - 后端按 NPU → GPU → CPU 自动选择（见 [RvcBackend]），并记录每级耗时。
- * - F0 时间平滑（指数滑动平均 α=0.3），消除帧间跳变爆音；
- * - 输出帧拼接处做交叉淡入淡出（2ms），消除 click 噪声。
+ * - F0 时间平滑（指数滑动平均 α=0.15），消除帧间跳变爆音；
+ * - 输出帧拼接处做交叉淡入淡出（4ms），消除 click 噪声。
+ * - 48k→16k 降采样使用 15 阶 FIR 抗混叠滤波器，消除镜像频率杂音。
  */
 class RvcProcessor(private val context: Context) : ProcessorEngine {
 
@@ -43,6 +44,18 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
         private const val XFADE_SAMPLES = 192
         /** 输出预填充量（样本）：约 200ms，防止推理启动时 underrun。 */
         private const val PREFILL_SAMPLES = Rvc.SAMPLE_RATE / 5
+
+        /**
+         * 15 阶线性相位 FIR 低通滤波器（截止 ~5.3kHz，用于 48k→16k 3:1 降采样前抗混叠）。
+         * 由 scipy.signal.firwin(15, cutoff=5300, fs=48000) 生成，增益归一化。
+         * 消除 8kHz 以上镜像频率折叠回 0-8kHz 带内产生的杂音。
+         */
+        private val DECIM_FIR = floatArrayOf(
+            -0.0022f, -0.0076f, -0.0106f, 0.0053f, 0.0301f, 0.0327f, -0.0153f, -0.0747f,
+            -0.0587f, 0.0828f, 0.2668f, 0.4107f, 0.2668f, 0.0828f, -0.0587f, -0.0747f,
+            -0.0153f, 0.0327f, 0.0301f, 0.0053f, -0.0106f, -0.0076f, -0.0022f,
+        )
+        private val DECIM_TAPS = DECIM_FIR.size  // 23
     }
 
     /** RVC 音色预设：不同 speaker ID + f0 调整量。 */
@@ -113,6 +126,8 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
     private var inWrite = 0
     private var inRead = 0
     private var decimCount = 0
+    /** FIR 滤波器延迟线（DECIM_TAPS-1 个历史样本）。 */
+    private val firDelay = FloatArray(DECIM_TAPS - 1)
 
     private val outRing = FloatArray(OUT_RING)
     private var outWrite = 0
@@ -200,18 +215,28 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
             for (i in 0 until PREFILL_SAMPLES) push(0f)
             prefilled = true
         }
-        var i = 0
-        while (i < length) {
+        // 48k → 16k：3:1 抗混叠降采样（FIR 低通 + 抽取）
+        val nTaps = DECIM_TAPS
+        val dN = nTaps - 1
+        for (i in 0 until length) {
+            val x = input[i] / 32768f
+            // 将新样本推入 FIR 延迟线
+            System.arraycopy(firDelay, 0, firDelay, 1, dN - 1)
+            firDelay[0] = x
+            // 每 3 个样本计算一次输出（decimCount 对 3 取余为 0 的位置）
             if (decimCount % 3 == 0) {
-                val v = (input[i] + input[minOf(i + 1, length - 1)] + input[minOf(i + 2, length - 1)]) / 98304f
+                var acc = 0f
+                for (j in 0 until nTaps) {
+                    val v = if (j < dN) firDelay[j] else x  // 最后一个用当前样本
+                    acc += DECIM_FIR[j] * v
+                }
                 val next = (inWrite + 1) % inRing.size
                 if (next != inRead) {
-                    inRing[inWrite] = v
+                    inRing[inWrite] = acc
                     inWrite = next
                 }
             }
             decimCount++
-            i++
         }
         var produced = 0
         while (produced < length && outRead != outWrite) {
@@ -416,6 +441,7 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
         lastOutSample = 0f
         underruns = 0
         java.util.Arrays.fill(prevTail, 0f)
+        java.util.Arrays.fill(firDelay, 0f)
     }
 
     override fun reset(discontinuity: Boolean) = resetRings()

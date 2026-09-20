@@ -206,6 +206,8 @@ private fun VoiceTab(
     var preset by remember { mutableStateOf(CurrentParams.preset) }
     // RVC 音色预设选中状态
     var rvcPreset by remember { mutableStateOf(com.voicechanger.app.processing.rvc.RvcProcessor.RvcVoicePreset.FEMALE_SOFT) }
+    // OpenVoice 音色预设选中状态
+    var ovPreset by remember { mutableStateOf(com.voicechanger.app.processing.openvoice.OpenVoiceProcessor.OvVoicePreset.FEMALE) }
 
     fun pushEffects(next: EffectParams) {
         effects = next
@@ -363,7 +365,7 @@ private fun VoiceTab(
                                     onSelectMode(mode)
                                     // AI 声线转换首版聚焦「男声→女声」：切换到该模式且音调未调整时，
                                     // 自动应用 +5 半音 / +2 dB 明亮度 / 1.25 共振峰 的女性化预处理
-                                    if (mode == ProcessorMode.AI_MEANVC && effects.pitchSemitones == 0f) {
+                                    if ((mode == ProcessorMode.AI_MEANVC || mode == ProcessorMode.AI_OPENVOICE) && effects.pitchSemitones == 0f) {
                                         preset = VoicePreset.CUSTOM
                                         pushEffects(
                                             effects.copy(
@@ -427,7 +429,7 @@ private fun VoiceTab(
                     }
 
                     // ---- 参数滑杆 ----
-                    if (selectedMode == ProcessorMode.INTERNAL || selectedMode == ProcessorMode.AI_MEANVC) {
+                    if (selectedMode == ProcessorMode.INTERNAL || selectedMode == ProcessorMode.AI_MEANVC || selectedMode == ProcessorMode.AI_OPENVOICE) {
                         ParamSlider("音调", effects.pitchSemitones, -12f, 12f, "半音") { v ->
                             preset = VoicePreset.detect(effects.copy(pitchSemitones = v))
                             pushEffects(effects.copy(pitchSemitones = v))
@@ -511,6 +513,82 @@ private fun VoiceTab(
                             val rvcStatus = com.voicechanger.app.processing.rvc.RvcStatus.describe(context)
                             Text(
                                 "模型: $rvcStatus",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
+                        }
+                    }
+                    // ---- AI 模式：OpenVoice 音色选择 ----
+                    if (selectedMode == ProcessorMode.AI_OPENVOICE) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "AI 声线（OpenVoice V2）",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        val ovPresets = com.voicechanger.app.processing.openvoice.OpenVoiceProcessor.OvVoicePreset.entries
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            ovPresets.take(3).forEach { p ->
+                                FilterChip(
+                                    selected = ovPreset == p,
+                                    onClick = {
+                                        ovPreset = p
+                                        service?.let { svc ->
+                                            val proc = svc.currentProcessor
+                                            if (proc is com.voicechanger.app.processing.openvoice.OpenVoiceProcessor) {
+                                                proc.setVoicePreset(p)
+                                            }
+                                        }
+                                        pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
+                                    },
+                                    label = { Text(p.label, fontSize = 11.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = Color(0xFFFF6B35).copy(alpha = 0.2f),
+                                    ),
+                                )
+                            }
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            ovPresets.drop(3).forEach { p ->
+                                FilterChip(
+                                    selected = ovPreset == p,
+                                    onClick = {
+                                        ovPreset = p
+                                        service?.let { svc ->
+                                            val proc = svc.currentProcessor
+                                            if (proc is com.voicechanger.app.processing.openvoice.OpenVoiceProcessor) {
+                                                proc.setVoicePreset(p)
+                                            }
+                                        }
+                                        pushEffects(effects.copy(pitchSemitones = p.f0Semitones))
+                                    },
+                                    label = { Text(p.label, fontSize = 11.sp) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = Color(0xFFFF6B35).copy(alpha = 0.2f),
+                                    ),
+                                )
+                            }
+                        }
+                        // OpenVoice 状态信息
+                        val ovProc = service?.let { svc ->
+                            svc.currentProcessor as? com.voicechanger.app.processing.openvoice.OpenVoiceProcessor
+                        }
+                        ovProc?.let { op ->
+                            Text(
+                                "状态: ${op.status} | 后端: ${op.backendLabel} | 推理: ${op.inferMs.toInt()}ms | underrun: ${op.underruns}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
+                        } ?: run {
+                            val ovStatus = com.voicechanger.app.processing.openvoice.OpenVoiceStatus.describe(context)
+                            Text(
+                                "模型: $ovStatus",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline,
                             )
@@ -773,6 +851,7 @@ private fun modeLabel(mode: ProcessorMode): String = when (mode) {
     ProcessorMode.PASSTHROUGH -> "直通（无处理）"
     ProcessorMode.INTERNAL -> "内部变声（推荐）"
     ProcessorMode.AI_MEANVC -> "AI 声线转换（RVC）"
+    ProcessorMode.AI_OPENVOICE -> "AI 声线转换（OpenVoice）"
     ProcessorMode.LOOPBACK_SOCKET -> "外部端口处理"
     ProcessorMode.MUTE -> "静音（测试用）"
 }

@@ -150,6 +150,9 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
     /** 上一次输出的最后一个样本值（欠载时做保持/插值，避免硬切静音）。 */
     private var lastOutSample: Float = 0f
 
+    /** 可复用的 process 后处理缓冲（避免每帧分配 → GC 卡顿）。 */
+    private val processBuf = FloatArray(AudioStandard.SAMPLES_PER_FRAME)
+
     // 统计
     private var nStat = 0
     private var sumMel = 0L
@@ -241,9 +244,8 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
             lastOutSample *= 0.92f  // 缓慢衰减
             output[produced++] = (lastOutSample * 32767f).toInt().coerceIn(-32768, 32767).toShort()
         }
-        // 输出后处理（在 Short 缓冲上就地做，消除 DC 漂移 + 底噪 + 高频颗粒）
-        // 转为 float 处理再写回
-        val tmp = FloatArray(length)
+        // 输出后处理（复用缓冲，消除 DC 漂移 + 底噪 + 高频颗粒）
+        val tmp = processBuf
         for (i in 0 until length) tmp[i] = output[i] / 32768f
         dcBlocker.process(tmp, length)
         noiseGate.process(tmp, length)

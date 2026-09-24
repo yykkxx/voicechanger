@@ -105,6 +105,7 @@ class OpenVoiceProcessor(private val context: Context) : ProcessorEngine {
     // 交叉淡入淡出
     private val prevTail = FloatArray(192)
     private var hasPrevTail = false
+    private val processBuf = FloatArray(480)
 
     // STFT 状态
     private val re = FloatArray(N_FFT)
@@ -182,11 +183,9 @@ class OpenVoiceProcessor(private val context: Context) : ProcessorEngine {
         }
         while (produced < length) { underruns++; lastOutSample *= 0.92f
             output[produced++] = (lastOutSample * 32767f).toInt().coerceIn(-32768, 32767).toShort() }
-        val tmp = FloatArray(length)
+        val tmp = processBuf
         for (i in 0 until length) tmp[i] = output[i] / 32768f
-        dcBlocker.process(tmp, length)
-        noiseGate.process(tmp, length)
-        highSmoother.process(tmp, length)
+        dcBlocker.process(tmp, length); noiseGate.process(tmp, length); highSmoother.process(tmp, length)
         for (i in 0 until length) output[i] = (tmp[i] * 32767f).coerceIn(-32768f, 32767f).toInt().toShort()
         return length
     }
@@ -228,22 +227,29 @@ class OpenVoiceProcessor(private val context: Context) : ProcessorEngine {
         val frames = 1 + wav16k.size / MEL_HOP
         val melFlat = computeMel(wav16k, frames)
 
-        // 2) tone converter 推理
-        val convertedMel = e.convert(melFlat, frames, N_MELS)
+        // 2) tone converter 推理 — 模型直接输出音频波形（不是 mel）
+        val audio = e.convert(melFlat, frames, N_MELS)
 
-        // 3) 简化声码器：mel → STFT 逆 → 波形
-        val audio = melToAudio(convertedMel, frames)
+        // 3) 如果输出长度匹配音频帧数 × hop，直接使用；否则做简单重采样
+        val expectedLen = frames * (SAMPLE_RATE / 100)
+        val result = if (audio.size == expectedLen) {
+            audio
+        } else if (audio.size > expectedLen) {
+            audio.copyOfRange(0, expectedLen)
+        } else {
+            audio.copyOf(expectedLen)
+        }
 
         val t1 = System.nanoTime()
         nStat++
         sumTotal += (t1 - t0) / 1_000_000
         if (nStat >= STAT_EVERY) {
             inferMs = (sumTotal / nStat).toFloat()
-            Log.i(TAG, "perf frames=$frames total=${inferMs}ms backend=${e.backend.id} underrun=$underruns")
+            Log.i(TAG, "perf frames=$frames total=${inferMs}ms backend=${e.backend.id} underrun=$underruns outLen=${audio.size}")
             nStat = 0; sumTotal = 0
         }
 
-        return audio
+        return result
     }
 
     /** 简化 mel 前端：16k wav → log-mel [80][T]。 */

@@ -354,8 +354,13 @@ class VoiceChangerService : Service() {
                 } else {
                     com.voicechanger.app.processing.female.FemaleVoiceProcessor()
                 }
-            // AI 声线转换：DDSP-SVC（超轻量，~10MB 或无模型用谐波合成）；总是可用
-            ProcessorMode.AI_DDSP -> com.voicechanger.app.processing.ddsp.DdspProcessor(this)
+            // AI 声线转换：DDSP-SVC（超轻量）；无模型时回退女声引擎
+            ProcessorMode.AI_DDSP ->
+                if (com.voicechanger.app.processing.ddsp.Ddsp.isReady(this)) {
+                    com.voicechanger.app.processing.ddsp.DdspProcessor(this)
+                } else {
+                    com.voicechanger.app.processing.female.FemaleVoiceProcessor()
+                }
             ProcessorMode.MUTE -> MuteProcessor()
         }
         // AI 声线转换默认「男声→女声」：+5 半音（男 ~110Hz → ~147Hz 女声区）

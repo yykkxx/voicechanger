@@ -23,7 +23,8 @@ object OpenVoice {
     private const val TAG = "VC/OpenVoice"
 
     const val DIR = "models/openvoice"
-    const val FILE_CONVERTER = "tone_converter.onnx"
+    const val FILE_CONVERTER = "tone_clone_model.onnx"
+    const val FILE_EXTRACTOR = "tone_color_extract_model.onnx"
 
     private val REQUIRED = listOf(FILE_CONVERTER)
 

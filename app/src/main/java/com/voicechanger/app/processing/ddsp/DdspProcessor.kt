@@ -4,6 +4,10 @@ import android.content.Context
 import android.util.Log
 import com.voicechanger.app.domain.EffectParams
 import com.voicechanger.app.domain.StreamFormat
+import com.voicechanger.app.processing.dsp.DcBlocker
+import com.voicechanger.app.processing.dsp.FirDecimator
+import com.voicechanger.app.processing.dsp.HighBandSmoother
+import com.voicechanger.app.processing.dsp.NoiseGate
 import com.voicechanger.app.processing.ProcessorEngine
 import kotlin.math.PI
 import kotlin.math.cos
@@ -43,14 +47,12 @@ class DdspProcessor(private val context: Context) : ProcessorEngine {
         private const val XFADE_SAMPLES = 192
         private const val N_HARMONICS = 30  // 谐波数
         private const val N_NOISE_BANDS = 5  // 噪声频带数
-
-        private val DECIM_FIR = floatArrayOf(
-            -0.0022f, -0.0076f, -0.0106f, 0.0053f, 0.0301f, 0.0327f, -0.0153f, -0.0747f,
-            -0.0587f, 0.0828f, 0.2668f, 0.4107f, 0.2668f, 0.0828f, -0.0587f, -0.0747f,
-            -0.0153f, 0.0327f, 0.0301f, 0.0053f, -0.0106f, -0.0076f, -0.0022f,
-        )
-        private val DECIM_TAPS = DECIM_FIR.size
     }
+
+    private val decimator = FirDecimator(3, 63, 7000.0, 48000.0)
+    private val dcBlocker = DcBlocker()
+    private val noiseGate = NoiseGate(SAMPLE_RATE, thresholdDb = -48f, floorGain = 0.1f)
+    private val highSmoother = HighBandSmoother(SAMPLE_RATE, 6000f, 0.3f)
 
     @Volatile var status: String = "未初始化"; private set
     @Volatile var active: Boolean = false; private set
@@ -66,7 +68,7 @@ class DdspProcessor(private val context: Context) : ProcessorEngine {
     // 环形缓冲
     private val inRing = FloatArray(1 shl 17)
     private var inWrite = 0; private var inRead = 0; private var decimCount = 0
-    private val firDelay = FloatArray(DECIM_TAPS - 1)
+    private val dec16 = FloatArray(160 + 2)
     private val outRing = FloatArray(OUT_RING)
     private var outWrite = 0; private var outRead = 0
     private var prefilled = false; private var lastOutSample = 0f
@@ -117,26 +119,22 @@ class DdspProcessor(private val context: Context) : ProcessorEngine {
     override fun process(input: ShortArray, length: Int, output: ShortArray): Int {
         if (!active) { System.arraycopy(input, 0, output, 0, length); return length }
         if (!prefilled) { for (i in 0 until SAMPLE_RATE / 5) push(0f); prefilled = true }
-        val nTaps = DECIM_TAPS; val dN = nTaps - 1
-        for (i in 0 until length) {
-            val x = input[i] / 32768f
-            System.arraycopy(firDelay, 0, firDelay, 1, dN - 1); firDelay[0] = x
-            if (decimCount % 3 == 0) {
-                var acc = 0f
-                for (j in 0 until nTaps) { val v = if (j < dN) firDelay[j] else x; acc += DECIM_FIR[j] * v }
-                val next = (inWrite + 1) % inRing.size
-                if (next != inRead) { inRing[inWrite] = acc; inWrite = next }
-            }
-            decimCount++
-        }
+        var dIdx = 0
+        for (i in 0 until length) { val x = input[i] / 32768f
+            if (decimator.process(x, dec16, dIdx)) dIdx++ }
+        for (i in 0 until dIdx) { val next = (inWrite + 1) % inRing.size
+            if (next == inRead) break; inRing[inWrite] = dec16[i]; inWrite = next }
         var produced = 0
         while (produced < length && outRead != outWrite) {
             lastOutSample = outRing[outRead]
             output[produced++] = (outRing[outRead] * 32767f).coerceIn(-32768f, 32767f).toInt().toShort()
-            outRead = (outRead + 1) % OUT_RING
-        }
+            outRead = (outRead + 1) % OUT_RING }
         while (produced < length) { underruns++; lastOutSample *= 0.92f
             output[produced++] = (lastOutSample * 32767f).toInt().coerceIn(-32768, 32767).toShort() }
+        val tmp = FloatArray(length)
+        for (i in 0 until length) tmp[i] = output[i] / 32768f
+        dcBlocker.process(tmp, length); noiseGate.process(tmp, length); highSmoother.process(tmp, length)
+        for (i in 0 until length) output[i] = (tmp[i] * 32767f).coerceIn(-32768f, 32767f).toInt().toShort()
         return length
     }
 
@@ -239,9 +237,10 @@ class DdspProcessor(private val context: Context) : ProcessorEngine {
     }
 
     private fun resetRings() {
-        inWrite = 0; inRead = 0; decimCount = 0; outWrite = 0; outRead = 0
+        inWrite = 0; inRead = 0; outWrite = 0; outRead = 0
         hasPrevTail = false; prefilled = false; lastOutSample = 0f; underruns = 0; f0Smoothed = 0f
-        java.util.Arrays.fill(prevTail, 0f); java.util.Arrays.fill(firDelay, 0f)
+        java.util.Arrays.fill(prevTail, 0f)
+        decimator.reset(); dcBlocker.reset(); noiseGate.reset(); highSmoother.reset()
     }
 
     override fun reset(discontinuity: Boolean) = resetRings()

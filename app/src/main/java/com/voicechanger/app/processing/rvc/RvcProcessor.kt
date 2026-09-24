@@ -4,7 +4,12 @@ import android.content.Context
 import android.util.Log
 import com.voicechanger.app.domain.EffectParams
 import com.voicechanger.app.domain.StreamFormat
+import com.voicechanger.app.domain.AudioStandard
 import com.voicechanger.app.processing.ProcessorEngine
+import com.voicechanger.app.processing.dsp.DcBlocker
+import com.voicechanger.app.processing.dsp.FirDecimator
+import com.voicechanger.app.processing.dsp.HighBandSmoother
+import com.voicechanger.app.processing.dsp.NoiseGate
 import java.io.File
 import kotlin.math.pow
 
@@ -45,18 +50,14 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
         /** 输出预填充量（样本）：约 200ms，防止推理启动时 underrun。 */
         private const val PREFILL_SAMPLES = Rvc.SAMPLE_RATE / 5
 
-        /**
-         * 15 阶线性相位 FIR 低通滤波器（截止 ~5.3kHz，用于 48k→16k 3:1 降采样前抗混叠）。
-         * 由 scipy.signal.firwin(15, cutoff=5300, fs=48000) 生成，增益归一化。
-         * 消除 8kHz 以上镜像频率折叠回 0-8kHz 带内产生的杂音。
-         */
-        private val DECIM_FIR = floatArrayOf(
-            -0.0022f, -0.0076f, -0.0106f, 0.0053f, 0.0301f, 0.0327f, -0.0153f, -0.0747f,
-            -0.0587f, 0.0828f, 0.2668f, 0.4107f, 0.2668f, 0.0828f, -0.0587f, -0.0747f,
-            -0.0153f, 0.0327f, 0.0301f, 0.0053f, -0.0106f, -0.0076f, -0.0022f,
-        )
-        private val DECIM_TAPS = DECIM_FIR.size  // 23
     }
+
+    /** 48k→16k 抗混叠抽取器（63 阶 Blackman-Harris 窗 FIR，阻带衰减 > 90 dB）。 */
+    private val decimator = FirDecimator(3, 63, 7000.0, 48000.0)
+    /** 输出后处理：DC 阻断 → 噪声门 → 高频平滑，消除模型底噪与帧边界颗粒。 */
+    private val dcBlocker = DcBlocker()
+    private val noiseGate = NoiseGate(Rvc.SAMPLE_RATE, thresholdDb = -48f, floorGain = 0.1f)
+    private val highSmoother = HighBandSmoother(Rvc.SAMPLE_RATE, 6000f, 0.3f)
 
     /** RVC 音色预设：不同 speaker ID + f0 调整量。 */
     enum class RvcVoicePreset(
@@ -125,9 +126,8 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
     private val inRing = FloatArray(1 shl 17)     // 16k 样本，约 8 s
     private var inWrite = 0
     private var inRead = 0
-    private var decimCount = 0
-    /** FIR 滤波器延迟线（DECIM_TAPS-1 个历史样本）。 */
-    private val firDelay = FloatArray(DECIM_TAPS - 1)
+    /** 降采样中间缓冲（每 3 个 48k 样本产出 1 个 16k 样本）。 */
+    private val dec16 = FloatArray(AudioStandard.SAMPLES_PER_FRAME / 3 + 2)
 
     private val outRing = FloatArray(OUT_RING)
     private var outWrite = 0
@@ -215,43 +215,40 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
             for (i in 0 until PREFILL_SAMPLES) push(0f)
             prefilled = true
         }
-        // 48k → 16k：3:1 抗混叠降采样（FIR 低通 + 抽取）
-        val nTaps = DECIM_TAPS
-        val dN = nTaps - 1
+        // 48k → 16k：3:1 抗混叠抽取（63 阶 Blackman-Harris FIR，延迟线语义正确）
+        var dIdx = 0
         for (i in 0 until length) {
             val x = input[i] / 32768f
-            // 将新样本推入 FIR 延迟线
-            System.arraycopy(firDelay, 0, firDelay, 1, dN - 1)
-            firDelay[0] = x
-            // 每 3 个样本计算一次输出（decimCount 对 3 取余为 0 的位置）
-            if (decimCount % 3 == 0) {
-                var acc = 0f
-                for (j in 0 until nTaps) {
-                    val v = if (j < dN) firDelay[j] else x  // 最后一个用当前样本
-                    acc += DECIM_FIR[j] * v
-                }
-                val next = (inWrite + 1) % inRing.size
-                if (next != inRead) {
-                    inRing[inWrite] = acc
-                    inWrite = next
-                }
-            }
-            decimCount++
+            if (decimator.process(x, dec16, dIdx)) dIdx++
         }
+        for (i in 0 until dIdx) {
+            val next = (inWrite + 1) % inRing.size
+            if (next == inRead) break
+            inRing[inWrite] = dec16[i]
+            inWrite = next
+        }
+        // 从输出环形缓冲读取 → 后处理 → 写入 output
         var produced = 0
         while (produced < length && outRead != outWrite) {
-            val v = outRing[outRead] * 32767f
-            lastOutSample = outRing[outRead]
-            output[produced++] = v.coerceIn(-32768f, 32767f).toInt().toShort()
+            val v = outRing[outRead]
+            lastOutSample = v
+            output[produced++] = (v * 32767f).coerceIn(-32768f, 32767f).toInt().toShort()
             outRead = (outRead + 1) % OUT_RING
         }
         // 欠载：用上一个样本的衰减保持（而非硬切静音），减少卡顿感
         while (produced < length) {
             underruns++
             lastOutSample *= 0.92f  // 缓慢衰减
-            val v = (lastOutSample * 32767f).toInt().coerceIn(-32768, 32767).toShort()
-            output[produced++] = v
+            output[produced++] = (lastOutSample * 32767f).toInt().coerceIn(-32768, 32767).toShort()
         }
+        // 输出后处理（在 Short 缓冲上就地做，消除 DC 漂移 + 底噪 + 高频颗粒）
+        // 转为 float 处理再写回
+        val tmp = FloatArray(length)
+        for (i in 0 until length) tmp[i] = output[i] / 32768f
+        dcBlocker.process(tmp, length)
+        noiseGate.process(tmp, length)
+        highSmoother.process(tmp, length)
+        for (i in 0 until length) output[i] = (tmp[i] * 32767f).coerceIn(-32768f, 32767f).toInt().toShort()
         return length
     }
 
@@ -433,7 +430,7 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
     }
 
     private fun resetRings() {
-        inWrite = 0; inRead = 0; decimCount = 0
+        inWrite = 0; inRead = 0
         outWrite = 0; outRead = 0
         hasPrevTail = false
         f0Smoothed = 0f
@@ -441,7 +438,10 @@ class RvcProcessor(private val context: Context) : ProcessorEngine {
         lastOutSample = 0f
         underruns = 0
         java.util.Arrays.fill(prevTail, 0f)
-        java.util.Arrays.fill(firDelay, 0f)
+        decimator.reset()
+        dcBlocker.reset()
+        noiseGate.reset()
+        highSmoother.reset()
     }
 
     override fun reset(discontinuity: Boolean) = resetRings()
